@@ -52,6 +52,7 @@ class BTB(object):
 #--------------------------------------------------------------------------
 #   Control signal table
 #--------------------------------------------------------------------------
+SP = 2
 
 csignals = {
     LW     : [ Y, BR_N  , OP1_RS1, OP2_IMI, OEN_1, OEN_0, ALU_ADD  , WB_MEM, REN_1, MEN_1, M_XRD, MT_W, ],
@@ -95,8 +96,8 @@ csignals = {
     EBREAK : [ Y, BR_N  , OP1_X  , OP2_X  , OEN_0, OEN_0, ALU_X    , WB_X  , REN_0, MEN_0, M_X  , MT_X, ],
 
     # Add entries for PUSH and POP instructions
-
-
+    PUSH   : [ Y, BR_N  , OP1_RS1, OP2_IMI, OEN_1, OEN_1, ALU_SUB  , WB_X  , REN_1, MEN_1, M_XWR, MT_W, ],
+    POP    : [ Y, BR_N  , OP1_RS1, OP2_IMI, OEN_1, OEN_0, ALU_ADD  , WB_MEM, REN_1, MEN_1, M_XRD, MT_W, ],
 }
 
 
@@ -227,13 +228,19 @@ class ID(Pipe):
         self.rs2        = RISCV.rs2(self.inst)          # for CTL (forwarding check)
         self.rd         = RISCV.rd(self.inst)
 
-        rf_rs1_data, rf_rs2_data = Pipe.cpu.rf.read(self.rs1, self.rs2)
-
         imm_i           = RISCV.imm_i(self.inst)
         imm_s           = RISCV.imm_s(self.inst)
         imm_b           = RISCV.imm_b(self.inst)
         imm_u           = RISCV.imm_u(self.inst)
         imm_j           = RISCV.imm_j(self.inst)
+        imm_p           = RISCV.sign_extend(4, 12)      # for push, pop
+
+        Pipe.CTL.preGen(self.inst)
+
+        if Pipe.CTL.push or Pipe.CTL.pop :
+            self.rs1 = SP
+        
+        rf_rs1_data, rf_rs2_data = Pipe.cpu.rf.read(self.rs1, self.rs2)
 
         # Generate control signals
         # CTL.gen() should be called after getting register numbers to detect forwarding condition
@@ -243,6 +250,7 @@ class ID(Pipe):
 
         # Determine ALU operand 2: R[rs2] or immediate values
         alu_op2 =       rf_rs2_data     if Pipe.CTL.op2_sel == OP2_RS2      else \
+                        imm_p           if Pipe.CTL.push or Pipe.CTL.pop    else \
                         imm_i           if Pipe.CTL.op2_sel == OP2_IMI      else \
                         imm_s           if Pipe.CTL.op2_sel == OP2_IMS      else \
                         imm_b           if Pipe.CTL.op2_sel == OP2_IMB      else \
@@ -253,27 +261,45 @@ class ID(Pipe):
         # Determine ALU operand 1: PC or R[rs1]
         # Get forwarded value for rs1 if necessary
         # The order matters: EX -> MM -> WB (forwarding from the closest stage)
-        self.op1_data = self.pc         if Pipe.CTL.op1_sel == OP1_PC       else \
-                        Pipe.EX.alu_out if Pipe.CTL.fwd_op1 == FWD_EX       else \
-                        Pipe.MM.wbdata  if Pipe.CTL.fwd_op1 == FWD_MM       else \
-                        Pipe.WB.wbdata  if Pipe.CTL.fwd_op1 == FWD_WB       else \
+        self.op1_data = Pipe.EX.alu_out     if Pipe.CTL.fwd_op1 == FWD_EX                       else \
+                        Pipe.EX.alu_out     if Pipe.CTL.fwd_sp_op1 == FWD_EX                    else \
+                        Pipe.MM.wbdata      if Pipe.CTL.fwd_op1 == FWD_MM                       else \
+                        Pipe.MM.alu_out     if Pipe.CTL.fwd_sp_op1 == FWD_MM and MM.reg_push    else \
+                        Pipe.MM.pop_sp_data if Pipe.CTL.fwd_sp_op1 == FWD_MM and MM.reg_pop     else \
+                        Pipe.WB.wbdata      if Pipe.CTL.fwd_op1 == FWD_WB                       else \
+                        Pipe.WB.wbdata      if Pipe.CTL.fwd_sp_op1 == FWD_WB and WB.reg_push    else \
+                        Pipe.WB.pop_sp_data if Pipe.CTL.fwd_sp_op1 == FWD_WB and WB.reg_pop     else \
                         rf_rs1_data
 
         # Get forwarded value for rs2 if necessary
         # The order matters: EX -> MM -> WB (forwarding from the closest stage)
-        self.op2_data = Pipe.EX.alu_out if Pipe.CTL.fwd_op2 == FWD_EX       else \
-                        Pipe.MM.wbdata  if Pipe.CTL.fwd_op2 == FWD_MM       else \
-                        Pipe.WB.wbdata  if Pipe.CTL.fwd_op2 == FWD_WB       else \
+        self.op2_data = Pipe.EX.alu_out     if Pipe.CTL.fwd_op2 == FWD_EX                       else \
+                        Pipe.EX.alu_out     if Pipe.CTL.fwd_sp_op2 == FWD_EX                    else \
+                        Pipe.MM.wbdata      if Pipe.CTL.fwd_op2 == FWD_MM                       else \
+                        Pipe.MM.alu_out     if Pipe.CTL.fwd_sp_op2 == FWD_MM and MM.reg_push    else \
+                        Pipe.MM.pop_sp_data if Pipe.CTL.fwd_sp_op2 == FWD_MM and MM.reg_pop     else \
+                        Pipe.WB.wbdata      if Pipe.CTL.fwd_op2 == FWD_WB                       else \
+                        Pipe.WB.wbdata      if Pipe.CTL.fwd_sp_op2 == FWD_WB and WB.reg_push    else \
+                        Pipe.WB.pop_sp_data if Pipe.CTL.fwd_sp_op2 == FWD_WB and WB.reg_pop     else \
                         alu_op2
 
         # Get forwarded value for rs2 if necessary
         # The order matters: EX -> MM -> WB (forwarding from the closest stage)
         # For sw and branch instructions, we need to carry R[rs2] as well
         # -- in these instructions, op2_data will hold an immediate value
-        self.rs2_data = Pipe.EX.alu_out if Pipe.CTL.fwd_rs2 == FWD_EX       else \
-                        Pipe.MM.wbdata  if Pipe.CTL.fwd_rs2 == FWD_MM       else \
-                        Pipe.WB.wbdata  if Pipe.CTL.fwd_rs2 == FWD_WB       else \
+        self.rs2_data = Pipe.EX.alu_out     if Pipe.CTL.fwd_rs2 == FWD_EX                       else \
+                        Pipe.EX.alu_out     if Pipe.CTL.fwd_sp_rs2 == FWD_EX                    else \
+                        Pipe.MM.wbdata      if Pipe.CTL.fwd_rs2 == FWD_MM                       else \
+                        Pipe.MM.alu_out     if Pipe.CTL.fwd_sp_rs2 == FWD_MM and MM.reg_push    else \
+                        Pipe.MM.pop_sp_data if Pipe.CTL.fwd_sp_rs2 == FWD_MM and MM.reg_pop     else \
+                        Pipe.WB.wbdata      if Pipe.CTL.fwd_rs2 == FWD_WB                       else \
+                        Pipe.WB.wbdata      if Pipe.CTL.fwd_sp_rs2 == FWD_WB and WB.reg_push    else \
+                        Pipe.WB.pop_sp_data if Pipe.CTL.fwd_sp_rs2 == FWD_WB and WB.reg_pop     else \
                         rf_rs2_data
+        
+        # for PUSH, POP
+        self.sp_data = self.op1_data
+        self.push_data = self.rs2_data
 
 
     def update(self):
@@ -286,6 +312,10 @@ class ID(Pipe):
             EX.reg_c_br_type        = WORD(BR_N)
             EX.reg_c_rf_wen         = False
             EX.reg_c_dmem_en        = False
+
+            # for PUSH, POP
+            EX.reg_push             = False
+            EX.reg_pop              = False
         else:
             EX.reg_inst             = self.inst
             EX.reg_exception        = self.exception
@@ -300,6 +330,12 @@ class ID(Pipe):
             EX.reg_c_dmem_en        = Pipe.CTL.dmem_en
             EX.reg_c_dmem_rw        = Pipe.CTL.dmem_rw
             EX.reg_pcplus4          = self.pcplus4
+
+            # for PUSH, POP
+            EX.reg_push             = Pipe.CTL.push
+            EX.reg_pop              = Pipe.CTL.pop
+            EX.reg_sp_data          = self.sp_data
+            EX.reg_push_data        = self.push_data
 
 
         Pipe.log(S_ID, self.pc, self.inst, self.log())
@@ -333,6 +369,12 @@ class EX(Pipe):
     reg_op2_data        = WORD(0)           # EX.reg_op2_data
     reg_rs2_data        = WORD(0)           # EX.reg_rs2_data
     reg_pcplus4         = WORD(0)           # EX.reg_pcplus4
+
+    # for PUSH, POP
+    reg_push            = False
+    reg_pop             = False
+    reg_sp_data         = WORD(0)
+    reg_push_data       = WORD(0)
 
     #--------------------------------------------------
 
@@ -383,6 +425,12 @@ class EX(Pipe):
         self.rs2_data           = EX.reg_rs2_data
         self.pcplus4            = EX.reg_pcplus4
 
+        # for PUSH, POP
+        self.push               = EX.reg_push
+        self.pop                = EX.reg_pop
+        self.sp_data            = EX.reg_sp_data
+        self.push_data          = EX.reg_push_data
+
 
         # For branch instructions, we use ALU to make comparisons between rs1 and rs2.
         # Since op2_data has an immediate value (offset) for branch instructions,
@@ -417,6 +465,10 @@ class EX(Pipe):
             MM.reg_inst             = WORD(BUBBLE)
             MM.reg_c_rf_wen         = False
             MM.reg_c_dmem_en        = False
+
+            # for PUSH, POP
+            MM.reg_push             = False
+            MM.reg_pop              = False
         else:
             MM.reg_inst             = self.inst
             MM.reg_rd               = self.rd
@@ -426,6 +478,14 @@ class EX(Pipe):
             MM.reg_c_dmem_rw        = self.c_dmem_rw
             MM.reg_alu_out          = self.alu_out
             MM.reg_rs2_data         = self.rs2_data
+
+            # for PUSH, POP
+            MM.reg_push             = self.push
+            MM.reg_pop              = self.pop
+            MM.reg_sp_data          = self.sp_data
+            MM.reg_push_data        = self.push_data
+            MM.reg_pop_sp_data      = self.alu_out
+            
 
         Pipe.log(S_EX, self.pc, self.inst, self.log())
 
@@ -470,6 +530,13 @@ class MM(Pipe):
     reg_alu_out         = WORD(0)           # MM.reg_alu_out
     reg_rs2_data        = WORD(0)           # MM.reg_rs2_data
 
+    # for PUSH, POP
+    reg_push            = False
+    reg_pop             = False
+    reg_sp_data         = WORD(0)
+    reg_push_data       = WORD(0)
+    reg_pop_sp_data     = WORD(0)
+
     #--------------------------------------------------
 
     def __init__(self):
@@ -505,8 +572,22 @@ class MM(Pipe):
         self.alu_out        = MM.reg_alu_out  
         self.rs2_data       = MM.reg_rs2_data 
 
+        # for PUSH, POP
+        self.push           = MM.reg_push
+        self.pop            = MM.reg_pop
+        self.sp_data        = MM.reg_sp_data
+        self.push_data      = MM.reg_push_data
+        self.pop_sp_data    = MM.reg_pop_sp_data
+
+
+        self.alu_out        = self.sp_data          if self.pop else    \
+                              self.alu_out
+        self.rs2_data       = self.push_data        if self.push else   \
+                              self.rs2_data
+
         # Access data memory (dmem) if needed
         mem_data, status = Pipe.cpu.dmem.access(self.c_dmem_en, self.alu_out, self.rs2_data, self.c_dmem_rw)
+        status = True
 
         # Handle exception during dmem access
         if not status:
@@ -515,7 +596,7 @@ class MM(Pipe):
 
         # For load instruction, we need to store the value read from dmem
         self.wbdata         = mem_data          if self.c_wb_sel == WB_MEM  else \
-                              self.alu_out  
+                              self.alu_out
 
 
     def update(self):
@@ -526,6 +607,11 @@ class MM(Pipe):
         WB.reg_rd           = self.rd
         WB.reg_c_rf_wen     = self.c_rf_wen
         WB.reg_wbdata       = self.wbdata
+
+        # for PUSH, POP
+        WB.reg_push             = self.push
+        WB.reg_pop              = self.pop
+        WB.reg_pop_sp_data      = self.pop_sp_data
 
         Pipe.log(S_MM, self.pc, self.inst, self.log())
 
@@ -554,6 +640,11 @@ class WB(Pipe):
     reg_c_rf_wen        = False             # WB.reg_c_rf_wen
     reg_wbdata          = WORD(0)           # WB.reg_wbdata
 
+    # for PUSH, POP
+    reg_push            = False
+    reg_pop             = False
+    reg_pop_sp_data     = WORD(0)
+
     #--------------------------------------------------
 
 
@@ -570,11 +661,21 @@ class WB(Pipe):
         self.c_rf_wen           = WB.reg_c_rf_wen 
         self.wbdata             = WB.reg_wbdata
 
+        # for PUSH, POP
+        self.push               = WB.reg_push
+        self.pop                = WB.reg_pop
+        self.pop_sp_data        = WB.reg_pop_sp_data
+
 
     def update(self):
 
         if self.c_rf_wen:
-            Pipe.cpu.rf.write(self.rd, self.wbdata)
+            if self.push :
+                Pipe.cpu.rf.write(SP, self.wbdata)
+            elif self.pop :
+                Pipe.cpu.rf.write(self.rd, self.wbdata, SP, self.pop_sp_data)
+            else :
+                Pipe.cpu.rf.write(self.rd, self.wbdata)
 
         Pipe.log(S_WB, self.pc, self.inst, self.log())
 
@@ -627,6 +728,12 @@ class Control(object):
         # These signals are used before gen() is called
         self.imem_en        = True
         self.imem_rw        = M_XRD
+    
+    def preGen(self, inst):
+        opcode = RISCV.opcode(inst)
+
+        self.push = (opcode == PUSH)
+        self.pop = (opcode == POP)
 
 
     def gen(self, inst):
@@ -701,6 +808,34 @@ class Control(object):
                                                (MM.reg_rd != 0) and Pipe.MM.c_rf_wen else   \
                                 FWD_WB      if (WB.reg_rd == Pipe.ID.rs2) and rs2_oen and   \
                                                (WB.reg_rd != 0) and WB.reg_c_rf_wen  else   \
+                                FWD_NONE
+        
+        # for sp dependency
+        self.fwd_sp_op1     =   FWD_EX      if (SP == Pipe.ID.rs1) and rs1_oen and          \
+                                               (EX.reg_push or EX.reg_pop) else             \
+                                FWD_MM      if (SP == Pipe.ID.rs1) and rs1_oen and          \
+                                               (MM.reg_push or MM.reg_pop) else             \
+                                FWD_WB      if (SP == Pipe.ID.rs1) and rs1_oen and          \
+                                               (WB.reg_push or WB.reg_pop) else             \
+                                FWD_NONE
+        
+        self.fwd_sp_op2     =   FWD_EX      if (SP == Pipe.ID.rs2) and                      \
+                                               (EX.reg_push or EX.reg_pop) and              \
+                                               self.op2_sel == OP2_RS2 else                 \
+                                FWD_MM      if (SP == Pipe.ID.rs2) and                      \
+                                               (MM.reg_push or MM.reg_pop) and              \
+                                               self.op2_sel == OP2_RS2 else                 \
+                                FWD_WB      if (SP == Pipe.ID.rs2) and                      \
+                                               (WB.reg_push or WB.reg_pop) and              \
+                                               self.op2_sel == OP2_RS2 else                 \
+                                FWD_NONE
+        
+        self.fwd_sp_rs2     =   FWD_EX      if (SP == Pipe.ID.rs2) and rs2_oen and          \
+                                               (EX.reg_push or EX.reg_pop) else             \
+                                FWD_MM      if (SP == Pipe.ID.rs2) and rs2_oen and          \
+                                               (MM.reg_push or MM.reg_pop) else             \
+                                FWD_WB      if (SP == Pipe.ID.rs2) and rs2_oen and          \
+                                               (WB.reg_push or WB.reg_pop) else             \
                                 FWD_NONE
 
         # Check for load-use data hazard
