@@ -105,6 +105,10 @@ class BTB(object):
 #--------------------------------------------------------------------------
 SP = WORD(2)
 
+P_N     = 0
+P_PUSH  = 1
+P_POP   = 2
+
 csignals = {
     LW     : [ Y, BR_N  , OP1_RS1, OP2_IMI, OEN_1, OEN_0, ALU_ADD  , WB_MEM, REN_1, MEN_1, M_XRD, MT_W, ],
     SW     : [ Y, BR_N  , OP1_RS1, OP2_IMS, OEN_1, OEN_1, ALU_ADD  , WB_X  , REN_0, MEN_1, M_XWR, MT_W, ],
@@ -147,7 +151,7 @@ csignals = {
     EBREAK : [ Y, BR_N  , OP1_X  , OP2_X  , OEN_0, OEN_0, ALU_X    , WB_X  , REN_0, MEN_0, M_X  , MT_X, ],
 
     # Add entries for PUSH and POP instructions
-    PUSH   : [ Y, BR_N  , OP1_RS1, OP2_IMI, OEN_1, OEN_1, ALU_SUB  , WB_X  , REN_1, MEN_1, M_XWR, MT_W, ],
+    PUSH   : [ Y, BR_N  , OP1_RS1, OP2_IMI, OEN_1, OEN_1, ALU_SUB  , WB_ALU, REN_1, MEN_1, M_XWR, MT_W, ],
     POP    : [ Y, BR_N  , OP1_RS1, OP2_IMI, OEN_1, OEN_0, ALU_ADD  , WB_MEM, REN_1, MEN_1, M_XRD, MT_W, ],
 }
 
@@ -303,7 +307,7 @@ class ID(Pipe):
 
         Pipe.CTL.preGen(self.inst)
 
-        if Pipe.CTL.push or Pipe.CTL.pop :
+        if Pipe.CTL.p_type in [P_PUSH, P_POP] :
             self.rs1 = SP
         
         rf_rs1_data, rf_rs2_data = Pipe.cpu.rf.read(self.rs1, self.rs2)
@@ -315,58 +319,57 @@ class ID(Pipe):
             self.inst = BUBBLE
 
         # Determine ALU operand 2: R[rs2] or immediate values
-        alu_op2 =       rf_rs2_data     if Pipe.CTL.op2_sel == OP2_RS2      else \
-                        imm_p           if Pipe.CTL.push or Pipe.CTL.pop    else \
-                        imm_i           if Pipe.CTL.op2_sel == OP2_IMI      else \
-                        imm_s           if Pipe.CTL.op2_sel == OP2_IMS      else \
-                        imm_b           if Pipe.CTL.op2_sel == OP2_IMB      else \
-                        imm_u           if Pipe.CTL.op2_sel == OP2_IMU      else \
-                        imm_j           if Pipe.CTL.op2_sel == OP2_IMJ      else \
+        alu_op2 =       rf_rs2_data     if Pipe.CTL.op2_sel == OP2_RS2          else \
+                        imm_p           if Pipe.CTL.p_type in [P_PUSH, P_POP]   else \
+                        imm_i           if Pipe.CTL.op2_sel == OP2_IMI          else \
+                        imm_s           if Pipe.CTL.op2_sel == OP2_IMS          else \
+                        imm_b           if Pipe.CTL.op2_sel == OP2_IMB          else \
+                        imm_u           if Pipe.CTL.op2_sel == OP2_IMU          else \
+                        imm_j           if Pipe.CTL.op2_sel == OP2_IMJ          else \
                         WORD(0)
 
         # Determine ALU operand 1: PC or R[rs1]
         # Get forwarded value for rs1 if necessary
         # The order matters: EX -> MM -> WB (forwarding from the closest stage)
-        self.op1_data = self.pc             if Pipe.CTL.op1_sel == OP1_PC                       else \
-                        Pipe.EX.alu_out     if Pipe.CTL.fwd_op1 == FWD_EX                       else \
-                        Pipe.EX.alu_out     if Pipe.CTL.fwd_sp_op1 == FWD_EX                    else \
-                        Pipe.MM.wbdata      if Pipe.CTL.fwd_op1 == FWD_MM                       else \
-                        Pipe.MM.alu_out     if Pipe.CTL.fwd_sp_op1 == FWD_MM and MM.reg_push    else \
-                        Pipe.MM.pop_sp_data if Pipe.CTL.fwd_sp_op1 == FWD_MM and MM.reg_pop     else \
-                        Pipe.WB.wbdata      if Pipe.CTL.fwd_op1 == FWD_WB                       else \
-                        Pipe.WB.wbdata      if Pipe.CTL.fwd_sp_op1 == FWD_WB and WB.reg_push    else \
-                        Pipe.WB.pop_sp_data if Pipe.CTL.fwd_sp_op1 == FWD_WB and WB.reg_pop     else \
+        self.op1_data = self.pc             if Pipe.CTL.op1_sel == OP1_PC                                   else \
+                        Pipe.EX.alu_out     if Pipe.CTL.fwd_op1 == FWD_EX                                   else \
+                        Pipe.EX.alu_out     if Pipe.CTL.fwd_sp_op1 == FWD_EX                                else \
+                        Pipe.MM.wbdata      if Pipe.CTL.fwd_op1 == FWD_MM                                   else \
+                        Pipe.MM.alu_out     if Pipe.CTL.fwd_sp_op1 == FWD_MM and MM.reg_p_type == P_PUSH    else \
+                        Pipe.MM.pop_sp_data if Pipe.CTL.fwd_sp_op1 == FWD_MM and MM.reg_p_type == P_POP     else \
+                        Pipe.WB.wbdata      if Pipe.CTL.fwd_op1 == FWD_WB                                   else \
+                        Pipe.WB.wbdata      if Pipe.CTL.fwd_sp_op1 == FWD_WB and WB.reg_p_type == P_PUSH    else \
+                        Pipe.WB.pop_sp_data if Pipe.CTL.fwd_sp_op1 == FWD_WB and WB.reg_p_type == P_POP     else \
                         rf_rs1_data
 
         # Get forwarded value for rs2 if necessary
         # The order matters: EX -> MM -> WB (forwarding from the closest stage)
-        self.op2_data = Pipe.EX.alu_out     if Pipe.CTL.fwd_op2 == FWD_EX                       else \
-                        Pipe.EX.alu_out     if Pipe.CTL.fwd_sp_op2 == FWD_EX                    else \
-                        Pipe.MM.wbdata      if Pipe.CTL.fwd_op2 == FWD_MM                       else \
-                        Pipe.MM.alu_out     if Pipe.CTL.fwd_sp_op2 == FWD_MM and MM.reg_push    else \
-                        Pipe.MM.pop_sp_data if Pipe.CTL.fwd_sp_op2 == FWD_MM and MM.reg_pop     else \
-                        Pipe.WB.wbdata      if Pipe.CTL.fwd_op2 == FWD_WB                       else \
-                        Pipe.WB.wbdata      if Pipe.CTL.fwd_sp_op2 == FWD_WB and WB.reg_push    else \
-                        Pipe.WB.pop_sp_data if Pipe.CTL.fwd_sp_op2 == FWD_WB and WB.reg_pop     else \
+        self.op2_data = Pipe.EX.alu_out     if Pipe.CTL.fwd_op2 == FWD_EX                                   else \
+                        Pipe.EX.alu_out     if Pipe.CTL.fwd_sp_op2 == FWD_EX                                else \
+                        Pipe.MM.wbdata      if Pipe.CTL.fwd_op2 == FWD_MM                                   else \
+                        Pipe.MM.alu_out     if Pipe.CTL.fwd_sp_op2 == FWD_MM and MM.reg_p_type == P_PUSH    else \
+                        Pipe.MM.pop_sp_data if Pipe.CTL.fwd_sp_op2 == FWD_MM and MM.reg_p_type == P_POP     else \
+                        Pipe.WB.wbdata      if Pipe.CTL.fwd_op2 == FWD_WB                                   else \
+                        Pipe.WB.wbdata      if Pipe.CTL.fwd_sp_op2 == FWD_WB and WB.reg_p_type == P_PUSH    else \
+                        Pipe.WB.pop_sp_data if Pipe.CTL.fwd_sp_op2 == FWD_WB and WB.reg_p_type == P_POP     else \
                         alu_op2
 
         # Get forwarded value for rs2 if necessary
         # The order matters: EX -> MM -> WB (forwarding from the closest stage)
         # For sw and branch instructions, we need to carry R[rs2] as well
         # -- in these instructions, op2_data will hold an immediate value
-        self.rs2_data = Pipe.EX.alu_out     if Pipe.CTL.fwd_rs2 == FWD_EX                       else \
-                        Pipe.EX.alu_out     if Pipe.CTL.fwd_sp_rs2 == FWD_EX                    else \
-                        Pipe.MM.wbdata      if Pipe.CTL.fwd_rs2 == FWD_MM                       else \
-                        Pipe.MM.alu_out     if Pipe.CTL.fwd_sp_rs2 == FWD_MM and MM.reg_push    else \
-                        Pipe.MM.pop_sp_data if Pipe.CTL.fwd_sp_rs2 == FWD_MM and MM.reg_pop     else \
-                        Pipe.WB.wbdata      if Pipe.CTL.fwd_rs2 == FWD_WB                       else \
-                        Pipe.WB.wbdata      if Pipe.CTL.fwd_sp_rs2 == FWD_WB and WB.reg_push    else \
-                        Pipe.WB.pop_sp_data if Pipe.CTL.fwd_sp_rs2 == FWD_WB and WB.reg_pop     else \
+        self.rs2_data = Pipe.EX.alu_out     if Pipe.CTL.fwd_rs2 == FWD_EX                                   else \
+                        Pipe.EX.alu_out     if Pipe.CTL.fwd_sp_rs2 == FWD_EX                                else \
+                        Pipe.MM.wbdata      if Pipe.CTL.fwd_rs2 == FWD_MM                                   else \
+                        Pipe.MM.alu_out     if Pipe.CTL.fwd_sp_rs2 == FWD_MM and MM.reg_p_type == P_PUSH    else \
+                        Pipe.MM.pop_sp_data if Pipe.CTL.fwd_sp_rs2 == FWD_MM and MM.reg_p_type == P_POP     else \
+                        Pipe.WB.wbdata      if Pipe.CTL.fwd_rs2 == FWD_WB                                   else \
+                        Pipe.WB.wbdata      if Pipe.CTL.fwd_sp_rs2 == FWD_WB and WB.reg_p_type == P_PUSH    else \
+                        Pipe.WB.pop_sp_data if Pipe.CTL.fwd_sp_rs2 == FWD_WB and WB.reg_p_type == P_POP     else \
                         rf_rs2_data
         
         # for PUSH, POP
         self.sp_data = self.op1_data
-        self.push_data = self.rs2_data
 
 
     def update(self):
@@ -381,8 +384,7 @@ class ID(Pipe):
             EX.reg_c_dmem_en        = False
 
             # for PUSH, POP
-            EX.reg_push             = False
-            EX.reg_pop              = False
+            EX.reg_p_type           = P_N
 
             # for BTB
             EX.reg_taken            = False
@@ -402,10 +404,8 @@ class ID(Pipe):
             EX.reg_pcplus4          = self.pcplus4
 
             # for PUSH, POP
-            EX.reg_push             = Pipe.CTL.push
-            EX.reg_pop              = Pipe.CTL.pop
+            EX.reg_p_type           = Pipe.CTL.p_type
             EX.reg_sp_data          = self.sp_data
-            EX.reg_push_data        = self.push_data
 
             # for BTB
             EX.reg_taken            = self.taken
@@ -444,10 +444,8 @@ class EX(Pipe):
     reg_pcplus4         = WORD(0)           # EX.reg_pcplus4
 
     # for PUSH, POP
-    reg_push            = False
-    reg_pop             = False
+    reg_p_type          = P_N
     reg_sp_data         = WORD(0)
-    reg_push_data       = WORD(0)
 
     # for BTB
     reg_taken           = False
@@ -502,10 +500,8 @@ class EX(Pipe):
         self.pcplus4            = EX.reg_pcplus4
 
         # for PUSH, POP
-        self.push               = EX.reg_push
-        self.pop                = EX.reg_pop
+        self.p_type             = EX.reg_p_type
         self.sp_data            = EX.reg_sp_data
-        self.push_data          = EX.reg_push_data
 
         # for BTB
         self.taken              = EX.reg_taken
@@ -546,8 +542,7 @@ class EX(Pipe):
             MM.reg_c_dmem_en        = False
 
             # for PUSH, POP
-            MM.reg_push             = False
-            MM.reg_pop              = False
+            MM.reg_p_type           = P_N
         else:
             MM.reg_inst             = self.inst
             MM.reg_rd               = self.rd
@@ -559,11 +554,9 @@ class EX(Pipe):
             MM.reg_rs2_data         = self.rs2_data
 
             # for PUSH, POP
-            MM.reg_push             = self.push
-            MM.reg_pop              = self.pop
+            MM.reg_p_type           = self.p_type
             MM.reg_sp_data          = self.sp_data
-            MM.reg_push_data        = self.push_data
-            MM.reg_pop_sp_data      = self.alu_out
+            MM.reg_sp_data_plus4    = self.alu_out
         
         # for BTB
         if self.taken and (Pipe.CTL.pc_sel != PC_BRJMP):
@@ -615,11 +608,9 @@ class MM(Pipe):
     reg_rs2_data        = WORD(0)           # MM.reg_rs2_data
 
     # for PUSH, POP
-    reg_push            = False
-    reg_pop             = False
+    reg_p_type          = P_N
     reg_sp_data         = WORD(0)
-    reg_push_data       = WORD(0)
-    reg_pop_sp_data     = WORD(0)
+    reg_sp_data_plus4   = WORD(0)
 
     #--------------------------------------------------
 
@@ -657,17 +648,13 @@ class MM(Pipe):
         self.rs2_data       = MM.reg_rs2_data 
 
         # for PUSH, POP
-        self.push           = MM.reg_push
-        self.pop            = MM.reg_pop
+        self.p_type         = MM.reg_p_type
         self.sp_data        = MM.reg_sp_data
-        self.push_data      = MM.reg_push_data
-        self.pop_sp_data    = MM.reg_pop_sp_data
+        self.sp_data_plus4  = MM.reg_sp_data_plus4
 
 
-        self.alu_out        = self.sp_data          if self.pop else    \
+        self.alu_out        = self.sp_data          if self.p_type == P_POP else    \
                               self.alu_out
-        self.rs2_data       = self.push_data        if self.push else   \
-                              self.rs2_data
 
         # Access data memory (dmem) if needed
         mem_data, status = Pipe.cpu.dmem.access(self.c_dmem_en, self.alu_out, self.rs2_data, self.c_dmem_rw)
@@ -692,9 +679,8 @@ class MM(Pipe):
         WB.reg_wbdata       = self.wbdata
 
         # for PUSH, POP
-        WB.reg_push             = self.push
-        WB.reg_pop              = self.pop
-        WB.reg_pop_sp_data      = self.pop_sp_data
+        WB.reg_p_type           = self.p_type
+        WB.reg_sp_data_plus4    = self.sp_data_plus4
 
         Pipe.log(S_MM, self.pc, self.inst, self.log())
 
@@ -724,9 +710,8 @@ class WB(Pipe):
     reg_wbdata          = WORD(0)           # WB.reg_wbdata
 
     # for PUSH, POP
-    reg_push            = False
-    reg_pop             = False
-    reg_pop_sp_data     = WORD(0)
+    reg_p_type          = P_N
+    reg_sp_data_plus4   = WORD(0)
 
     #--------------------------------------------------
 
@@ -745,18 +730,17 @@ class WB(Pipe):
         self.wbdata             = WB.reg_wbdata
 
         # for PUSH, POP
-        self.push               = WB.reg_push
-        self.pop                = WB.reg_pop
-        self.pop_sp_data        = WB.reg_pop_sp_data
+        self.p_type             = WB.reg_p_type
+        self.sp_data_plus4      = WB.reg_sp_data_plus4
 
 
     def update(self):
 
         if self.c_rf_wen:
-            if self.push :
+            if self.p_type == P_PUSH :
                 Pipe.cpu.rf.write(SP, self.wbdata)
-            elif self.pop :
-                Pipe.cpu.rf.write(self.rd, self.wbdata, SP, self.pop_sp_data)
+            elif self.p_type == P_POP :
+                Pipe.cpu.rf.write(self.rd, self.wbdata, SP, self.sp_data_plus4)
             else :
                 Pipe.cpu.rf.write(self.rd, self.wbdata)
 
@@ -815,8 +799,9 @@ class Control(object):
     def preGen(self, inst):
         opcode = RISCV.opcode(inst)
 
-        self.push = (opcode == PUSH)
-        self.pop = (opcode == POP)
+        self.p_type = P_PUSH    if opcode == PUSH   else \
+                      P_POP     if opcode == POP    else \
+                      P_N
 
 
     def gen(self, inst):
@@ -899,30 +884,30 @@ class Control(object):
         
         # for sp dependency
         self.fwd_sp_op1     =   FWD_EX      if (SP == Pipe.ID.rs1) and rs1_oen and          \
-                                               (EX.reg_push or EX.reg_pop) else             \
+                                               (EX.reg_p_type in [P_PUSH, P_POP]) else      \
                                 FWD_MM      if (SP == Pipe.ID.rs1) and rs1_oen and          \
-                                               (MM.reg_push or MM.reg_pop) else             \
+                                               (MM.reg_p_type in [P_PUSH, P_POP]) else      \
                                 FWD_WB      if (SP == Pipe.ID.rs1) and rs1_oen and          \
-                                               (WB.reg_push or WB.reg_pop) else             \
+                                               (WB.reg_p_type in [P_PUSH, P_POP]) else      \
                                 FWD_NONE
         
         self.fwd_sp_op2     =   FWD_EX      if (SP == Pipe.ID.rs2) and                      \
-                                               (EX.reg_push or EX.reg_pop) and              \
+                                               (EX.reg_p_type in [P_PUSH, P_POP]) and       \
                                                self.op2_sel == OP2_RS2 else                 \
                                 FWD_MM      if (SP == Pipe.ID.rs2) and                      \
-                                               (MM.reg_push or MM.reg_pop) and              \
+                                               (MM.reg_p_type in [P_PUSH, P_POP]) and       \
                                                self.op2_sel == OP2_RS2 else                 \
                                 FWD_WB      if (SP == Pipe.ID.rs2) and                      \
-                                               (WB.reg_push or WB.reg_pop) and              \
+                                               (WB.reg_p_type in [P_PUSH, P_POP]) and       \
                                                self.op2_sel == OP2_RS2 else                 \
                                 FWD_NONE
         
         self.fwd_sp_rs2     =   FWD_EX      if (SP == Pipe.ID.rs2) and rs2_oen and          \
-                                               (EX.reg_push or EX.reg_pop) else             \
+                                               (EX.reg_p_type in [P_PUSH, P_POP]) else      \
                                 FWD_MM      if (SP == Pipe.ID.rs2) and rs2_oen and          \
-                                               (MM.reg_push or MM.reg_pop) else             \
+                                               (MM.reg_p_type in [P_PUSH, P_POP]) else      \
                                 FWD_WB      if (SP == Pipe.ID.rs2) and rs2_oen and          \
-                                               (WB.reg_push or WB.reg_pop) else             \
+                                               (WB.reg_p_type in [P_PUSH, P_POP]) else      \
                                 FWD_NONE
 
         # Check for load-use data hazard
