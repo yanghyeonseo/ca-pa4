@@ -109,6 +109,10 @@ P_N     = 0
 P_PUSH  = 1
 P_POP   = 2
 
+TAKEN_N = 0
+TAKEN_0 = 1
+TAKEN_1 = 2
+
 csignals = {
     LW     : [ Y, BR_N  , OP1_RS1, OP2_IMI, OEN_1, OEN_0, ALU_ADD  , WB_MEM, REN_1, MEN_1, M_XRD, MT_W, ],
     SW     : [ Y, BR_N  , OP1_RS1, OP2_IMS, OEN_1, OEN_1, ALU_ADD  , WB_X  , REN_0, MEN_1, M_XWR, MT_W, ],
@@ -202,15 +206,18 @@ class IF(Pipe):
 
         # for BTB
         target = Pipe.cpu.btb.lookup(self.pc)
-        self.taken = (target != None)
+        self.taken = TAKEN_0    if target == None   else \
+                     TAKEN_1
 
         # Select next PC
-        self.pc_next =  Pipe.EX.jump_reg_target if Pipe.CTL.pc_sel == PC_JALR                           else \
-                        target                  if (Pipe.CTL.right_predict) and self.taken              else \
-                        self.pcplus4            if (Pipe.CTL.right_predict) and (not self.taken)        else \
-                        Pipe.EX.pcplus4         if (not Pipe.CTL.right_predict) and EX.reg_taken        else \
-                        Pipe.EX.brjmp_target    if (not Pipe.CTL.right_predict) and (not EX.reg_taken)  else \
-                        WORD(0)   
+        self.pc_next =  target                  if (Pipe.EX.inst == BUBBLE) and (self.taken == TAKEN_1) else \
+                        self.pcplus4            if (Pipe.EX.inst == BUBBLE) and (self.taken == TAKEN_0) else \
+                        Pipe.EX.jump_reg_target if Pipe.CTL.pc_sel == PC_JALR                           else \
+                        target                  if (Pipe.CTL.right_predict) and (self.taken == TAKEN_1) else \
+                        self.pcplus4            if (Pipe.CTL.right_predict) and (self.taken == TAKEN_0) else \
+                        Pipe.EX.pcplus4         if (not Pipe.CTL.right_predict) and (EX.taken == TAKEN_1) else \
+                        Pipe.EX.brjmp_target    if (not Pipe.CTL.right_predict) and (EX.taken == TAKEN_0) else \
+                        self.pcplus4
 
 
     def update(self):
@@ -258,7 +265,7 @@ class ID(Pipe):
     reg_pcplus4     = WORD(0)           # ID.reg_pcplus4
 
     # for BTB
-    reg_taken       = False
+    reg_taken       = TAKEN_N
 
     #--------------------------------------------------
 
@@ -387,7 +394,7 @@ class ID(Pipe):
             EX.reg_p_type           = P_N
 
             # for BTB
-            EX.reg_taken            = False
+            EX.reg_taken            = TAKEN_N
         else:
             EX.reg_inst             = self.inst
             EX.reg_exception        = self.exception
@@ -448,7 +455,7 @@ class EX(Pipe):
     reg_sp_data         = WORD(0)
 
     # for BTB
-    reg_taken           = False
+    reg_taken           = TAKEN_N
 
     #--------------------------------------------------
 
@@ -559,9 +566,9 @@ class EX(Pipe):
             MM.reg_sp_data_plus4    = self.alu_out
 
             # for BTB
-            if (self.inst != BUBBLE) and self.taken and (Pipe.CTL.pc_sel != PC_BRJMP):
+            if (self.inst != BUBBLE) and (self.taken == TAKEN_1) and (Pipe.CTL.pc_sel != PC_BRJMP):
                 Pipe.cpu.btb.remove(self.pc)
-            elif (self.inst != BUBBLE) and (not self.taken) and (Pipe.CTL.pc_sel == PC_BRJMP):
+            elif (self.inst != BUBBLE) and (self.taken == TAKEN_0) and (Pipe.CTL.pc_sel == PC_BRJMP):
                 Pipe.cpu.btb.add(self.pc, self.brjmp_target)
         
         Pipe.log(S_EX, self.pc, self.inst, self.log())
@@ -847,8 +854,8 @@ class Control(object):
                                 PC_4
         
         # for BTB
-        self.right_predict  =   ((self.pc_sel == PC_BRJMP) and EX.reg_taken) or \
-                                ((self.pc_sel == PC_4) and (not EX.reg_taken))
+        self.right_predict  =   ((self.pc_sel == PC_BRJMP) and (EX.reg_taken == TAKEN_1)) or \
+                                ((self.pc_sel == PC_4) and (EX.reg_taken == TAKEN_0))
 
         # Control signal for forwarding rs1 value to op1_data
         # The c_rf_wen signal can be disabled when we have an exception during dmem access,
