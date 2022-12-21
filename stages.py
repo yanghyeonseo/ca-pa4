@@ -31,21 +31,21 @@ from pipe import *
 class BTB(object):
     def __init__(self, k):
         self.k = k
-        self.btb = [0 for i in range(2 ** self.k)]
+        self.btb        = [0 for i in range(2 ** self.k)]
         
-        self.V_MASK = (0b1 << (64 - k))
-        self.T_MASK = (0b1 << (64 - k)) - (0b1 << 32)
-        self.A_MASK = (0b1 << 32) - 0b1
+        # for block
+        self.V_MASK     = (0b1 << (64 - k))
+        self.T_MASK     = (0b1 << (64 - k)) - (0b1 << 32)
+        self.A_MASK     = (0b1 << 32) - 0b1
         
-        self.V_SHIFT = 64 - k
-        self.T_SHIFT = 32
+        self.V_SHIFT    = 64 - k
+        self.T_SHIFT    = 32
 
-
-
+        # for pc
         self.INDEX_MASK = (0b1 << (k + 2)) - (0b1 << 2)
-        self.TAG_MASK = (0b1 << 32) - (0b1 << (k + 2))
+        self.TAG_MASK   = (0b1 << 32) - (0b1 << (k + 2))
 
-        self.TAG_SHIFT = k + 2
+        self.TAG_SHIFT  = k + 2
     
     def get_block_V(self, block):
         return (block & self.V_MASK) >> self.V_SHIFT
@@ -206,7 +206,7 @@ class IF(Pipe):
                         Pipe.EX.brjmp_target    if (not Pipe.CTL.right_predict) and (not EX.reg_taken)  else \
                         target                  if (Pipe.CTL.right_predict) and self.taken              else \
                         self.pcplus4            if (Pipe.CTL.right_predict) and (not self.taken)        else \
-                        WORD(0)
+                        WORD(0)   
 
 
     def update(self):
@@ -570,7 +570,7 @@ class EX(Pipe):
             Pipe.cpu.btb.remove(self.pc)
         elif (not self.taken) and (Pipe.CTL.pc_sel == PC_BRJMP):
             Pipe.cpu.btb.add(self.pc, self.brjmp_target)
-
+        
         Pipe.log(S_EX, self.pc, self.inst, self.log())
 
 
