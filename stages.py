@@ -29,30 +29,81 @@ from pipe import *
 #--------------------------------------------------------------------------
 
 class BTB(object):
-
     def __init__(self, k):
         self.k = k
-        # initialize your BTB here
+        self.btb = [0 for i in range(2 ** self.k)]
+        
+        self.V_MASK = (0b1 << (64 - k))
+        self.T_MASK = (0b1 << (64 - k)) - (0b1 << 32)
+        self.A_MASK = (0b1 << 32) - 0b1
+        
+        self.V_SHIFT = 64 - k
+        self.T_SHIFT = 32
 
+
+
+        self.INDEX_MASK = (0b1 << (k + 2)) - (0b1 << 2)
+        self.TAG_MASK = (0b1 << 32) - (0b1 << (k + 2))
+
+        self.TAG_SHIFT = k + 2
+    
+    def get_block_V(self, block):
+        return (block & self.V_MASK) >> self.V_SHIFT
+    
+    def get_block_T(self, block):
+        return (block & self.T_MASK) >> self.T_SHIFT
+    
+    def get_block_A(self, block):
+        return (block & self.A_MASK)
+    
+    def get_pc_index(self, pc):
+        return (pc & self.INDEX_MASK) >> 2
+    
+    def get_pc_tag(self, pc):
+        return (pc & self.TAG_MASK) >> self.TAG_SHIFT
+    
+    def make_block(self, V, T, A):
+        return (V << self.V_SHIFT) | (T << self.T_SHIFT) | A
+    
     # Lookup the entry corresponding to the pc
     # It will return the target address if there is a matching entry
     def lookup(self, pc):
-        return 0
+        pc_index    = self.get_pc_index(pc)
+        pc_tag      = self.get_pc_tag(pc)
 
+        block       = self.btb[pc_index]
+        block_V     = self.get_block_V(block)
+        block_T     = self.get_block_T(block)
+        block_A     = self.get_block_A(block)
+
+        if (block_V == 1) and (block_T == pc_tag) :
+            return WORD(block_A)
+        else :
+            return None
+    
     # Add an entry 
     def add(self, pc, target):
-        return
+        pc_index    = self.get_pc_index(pc)
+        pc_tag      = self.get_pc_tag(pc)
 
-    # Make the corresponding entry invalid
+        block       = self.make_block(0b1, pc_tag, target)
+
+        self.btb[pc_index] = block
+
+        return
+    
+    # Remove an entry
     def remove(self, pc):
+        pc_index    = self.get_pc_index(pc)
+
+        self.btb[pc_index] = 0
+
         return
-
-
 
 #--------------------------------------------------------------------------
 #   Control signal table
 #--------------------------------------------------------------------------
-SP = 2
+SP = WORD(2)
 
 csignals = {
     LW     : [ Y, BR_N  , OP1_RS1, OP2_IMI, OEN_1, OEN_0, ALU_ADD  , WB_MEM, REN_1, MEN_1, M_XRD, MT_W, ],
@@ -145,11 +196,17 @@ class IF(Pipe):
         # Compute PC + 4 using an adder
         self.pcplus4 = Pipe.cpu.adder_pcplus4.op(self.pc, 4)
 
+        # for BTB
+        target = Pipe.cpu.btb.lookup(self.pc)
+        self.taken = (target != None)
+
         # Select next PC
-        self.pc_next =  self.pcplus4            if Pipe.CTL.pc_sel == PC_4      else \
-                        Pipe.EX.brjmp_target    if Pipe.CTL.pc_sel == PC_BRJMP  else \
-                        Pipe.EX.jump_reg_target if Pipe.CTL.pc_sel == PC_JALR   else \
-                        WORD(0)                 
+        self.pc_next =  Pipe.EX.jump_reg_target if Pipe.CTL.pc_sel == PC_JALR                           else \
+                        EX.reg_pcplus4          if (not Pipe.CTL.right_predict) and EX.reg_taken        else \
+                        Pipe.EX.brjmp_target    if (not Pipe.CTL.right_predict) and (not EX.reg_taken)  else \
+                        target                  if (Pipe.CTL.right_predict) and self.taken              else \
+                        self.pcplus4            if (Pipe.CTL.right_predict) and (not self.taken)        else \
+                        WORD(0)
 
 
     def update(self):
@@ -170,6 +227,9 @@ class IF(Pipe):
             ID.reg_inst         = self.inst
             ID.reg_exception    = self.exception
             ID.reg_pcplus4      = self.pcplus4
+
+            # for BTB
+            ID.reg_taken        = self.taken
         else:               # Pipe.CTL.ID_stall
             pass            # Do not update
 
@@ -192,6 +252,9 @@ class ID(Pipe):
     reg_inst        = WORD(BUBBLE)      # ID.reg_inst
     reg_exception   = WORD(EXC_NONE)    # ID.reg_exception
     reg_pcplus4     = WORD(0)           # ID.reg_pcplus4
+
+    # for BTB
+    reg_taken       = False
 
     #--------------------------------------------------
 
@@ -228,6 +291,9 @@ class ID(Pipe):
         self.rs2        = RISCV.rs2(self.inst)          # for CTL (forwarding check)
         self.rd         = RISCV.rd(self.inst)
 
+        # for BTB
+        self.taken      = ID.reg_taken
+
         imm_i           = RISCV.imm_i(self.inst)
         imm_s           = RISCV.imm_s(self.inst)
         imm_b           = RISCV.imm_b(self.inst)
@@ -261,7 +327,8 @@ class ID(Pipe):
         # Determine ALU operand 1: PC or R[rs1]
         # Get forwarded value for rs1 if necessary
         # The order matters: EX -> MM -> WB (forwarding from the closest stage)
-        self.op1_data = Pipe.EX.alu_out     if Pipe.CTL.fwd_op1 == FWD_EX                       else \
+        self.op1_data = self.pc             if Pipe.CTL.op1_sel == OP1_PC                       else \
+                        Pipe.EX.alu_out     if Pipe.CTL.fwd_op1 == FWD_EX                       else \
                         Pipe.EX.alu_out     if Pipe.CTL.fwd_sp_op1 == FWD_EX                    else \
                         Pipe.MM.wbdata      if Pipe.CTL.fwd_op1 == FWD_MM                       else \
                         Pipe.MM.alu_out     if Pipe.CTL.fwd_sp_op1 == FWD_MM and MM.reg_push    else \
@@ -316,6 +383,9 @@ class ID(Pipe):
             # for PUSH, POP
             EX.reg_push             = False
             EX.reg_pop              = False
+
+            # for BTB
+            EX.reg_taken            = False
         else:
             EX.reg_inst             = self.inst
             EX.reg_exception        = self.exception
@@ -336,6 +406,9 @@ class ID(Pipe):
             EX.reg_pop              = Pipe.CTL.pop
             EX.reg_sp_data          = self.sp_data
             EX.reg_push_data        = self.push_data
+
+            # for BTB
+            EX.reg_taken            = self.taken
 
 
         Pipe.log(S_ID, self.pc, self.inst, self.log())
@@ -375,6 +448,9 @@ class EX(Pipe):
     reg_pop             = False
     reg_sp_data         = WORD(0)
     reg_push_data       = WORD(0)
+
+    # for BTB
+    reg_taken           = False
 
     #--------------------------------------------------
 
@@ -431,6 +507,9 @@ class EX(Pipe):
         self.sp_data            = EX.reg_sp_data
         self.push_data          = EX.reg_push_data
 
+        # for BTB
+        self.taken              = EX.reg_taken
+
 
         # For branch instructions, we use ALU to make comparisons between rs1 and rs2.
         # Since op2_data has an immediate value (offset) for branch instructions,
@@ -485,7 +564,12 @@ class EX(Pipe):
             MM.reg_sp_data          = self.sp_data
             MM.reg_push_data        = self.push_data
             MM.reg_pop_sp_data      = self.alu_out
-            
+        
+        # for BTB
+        if self.taken and (Pipe.CTL.pc_sel != PC_BRJMP):
+            Pipe.cpu.btb.remove(self.pc)
+        elif (not self.taken) and (Pipe.CTL.pc_sel == PC_BRJMP):
+            Pipe.cpu.btb.add(self.pc, self.brjmp_target)
 
         Pipe.log(S_EX, self.pc, self.inst, self.log())
 
@@ -587,7 +671,6 @@ class MM(Pipe):
 
         # Access data memory (dmem) if needed
         mem_data, status = Pipe.cpu.dmem.access(self.c_dmem_en, self.alu_out, self.rs2_data, self.c_dmem_rw)
-        status = True
 
         # Handle exception during dmem access
         if not status:
@@ -777,6 +860,10 @@ class Control(object):
                                                (EX.reg_c_br_type == BR_J) else                              \
                                 PC_JALR     if  EX.reg_c_br_type == BR_JR else                              \
                                 PC_4
+        
+        # for BTB
+        self.right_predict  =   ((self.pc_sel == PC_BRJMP) and EX.reg_taken) or \
+                                ((self.pc_sel == PC_4) and (not EX.reg_taken))
 
         # Control signal for forwarding rs1 value to op1_data
         # The c_rf_wen signal can be disabled when we have an exception during dmem access,
@@ -845,7 +932,7 @@ class Control(object):
                                (EX.reg_rd == Pipe.ID.rs2 and rs2_oen))
 
         # Check for mispredicted branch/jump
-        EX_brjmp            = self.pc_sel != PC_4
+        EX_brjmp            = not self.right_predict
 
         # For load-use hazard, ID and IF are stalled for one cycle (and EX bubbled)
         # For mispredicted branches, instructions in ID and IF should be cancelled (become BUBBLE)
